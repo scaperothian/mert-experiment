@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "mert-experiment"
+version = "0.1.0"
+description = "Experimenting with MERT audio embeddings for section similarity"
+authors = ["scaperoth@berkeley.edu"]
+packages = [{ include = "mert_experiment" }]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+torch = ">=2.0"
+torchaudio = ">=2.0"
+transformers = ">=4.35"
+numpy = ">=1.24"
+soundfile = ">=0.12"
+matplotlib = ">=3.7"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0"
+pytest-cov = ">=4.0"
+
+[tool.poetry.scripts]
+mert-sim = "mert_experiment.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
