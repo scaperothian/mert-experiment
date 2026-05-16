@@ -75,14 +75,8 @@ mert-sim song.json
 ### From a raw audio file
 
 ```bash
-# Full file as one section
+# Treats the full file as a single section labelled "full"
 mert-sim song.wav
-
-# Named sections with timestamps (seconds)
-mert-sim song.wav \
-  --section Intro   0   30 \
-  --section Verse1  30  90 \
-  --section Chorus  90  130
 ```
 
 ### Flags

@@ -17,6 +17,7 @@ with the same fitted mu/W and compared against each prototype.
 """
 
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
@@ -162,12 +163,21 @@ def _run(
     processor, model = load_model(device)
     wav = load_audio(audio_path)
     duration = wav.shape[0] / TARGET_SR
-    print(f"  {duration:.2f}s, {wav.shape[0]} samples @ {TARGET_SR} Hz")
+    print(f"  Duration : {duration:.2f}s  ({wav.shape[0]:,} samples @ {TARGET_SR} Hz)")
 
     print("Running MERT inference...")
+    t0 = time.perf_counter()
     hidden = embed_full_song(wav, model, processor, device)
-    total_frames = hidden.shape[1]
-    print(f"  hidden states: {tuple(hidden.shape)}  (layers+1, frames, dim)")
+    embed_time = time.perf_counter() - t0
+
+    n_layers, total_frames, hidden_dim = hidden.shape
+    print(
+        f"  Layers   : {n_layers}  |  Frames: {total_frames:,}  |  Dim: {hidden_dim}"
+    )
+    print(
+        f"  Time     : {embed_time:.1f}s  "
+        f"({duration / embed_time:.1f}× real-time)"
+    )
 
     all_spans  = whole_song_window_spans(total_frames, window=window, hop=hop)
     section_of = [frame_to_section_assignment(sp, sections) for sp in all_spans]
@@ -223,7 +233,10 @@ def _run(
     # --- Show all interactive figures at once --------------------------------
     if plot and not plot_output:
         import matplotlib.pyplot as plt
-        plt.show()
+        try:
+            plt.show()
+        except KeyboardInterrupt:
+            plt.close("all")
 
     # --- Save VERSION A npz --------------------------------------------------
     if save_npz:
@@ -257,17 +270,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "input",
         help="Path to a ProPresenter JSON manifest OR an audio file (.wav, .mp3, …).",
-    )
-    p.add_argument(
-        "--section",
-        metavar=("LABEL", "START", "STOP"),
-        nargs=3,
-        action="append",
-        dest="sections",
-        help=(
-            "Audio-file mode only: define a section as LABEL START STOP (seconds). "
-            "Repeatable. Omit to treat the full file as one section."
-        ),
     )
 
     # Transform flags (both on by default)
@@ -365,22 +367,14 @@ def main(argv: list[str] | None = None) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if input_path.suffix.lower() == ".json":
-        if args.sections:
-            parser.error("--section is only valid when passing an audio file, not a JSON.")
         audio_path, sections = load_song(input_path)
         audio_name = input_path.stem
 
     elif input_path.suffix.lower() in AUDIO_SUFFIXES:
-        if args.sections:
-            sections = [
-                {"label": s[0], "start": float(s[1]), "stop": float(s[2])}
-                for s in args.sections
-            ]
-        else:
-            import torchaudio
-            info = torchaudio.info(str(input_path))
-            duration = info.num_frames / info.sample_rate
-            sections = [{"label": "full", "start": 0.0, "stop": duration}]
+        import torchaudio
+        info = torchaudio.info(str(input_path))
+        duration = info.num_frames / info.sample_rate
+        sections = [{"label": "full", "start": 0.0, "stop": duration}]
         audio_path = input_path
         audio_name = input_path.stem
 
@@ -398,21 +392,24 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  [{i}] {s['start']:6.2f}-{s['stop']:6.2f}s :: {s['label']}")
     print()
 
-    _run(
-        audio_path=audio_path,
-        sections=sections,
-        device=device,
-        center=center,
-        whiten=whiten,
-        also_pairwise=args.also_pairwise,
-        plot=not args.no_plot,
-        plot_output=Path(args.plot_output) if args.plot_output else None,
-        save_npz=Path(args.save_npz) if args.save_npz else None,
-        audio_name=audio_name,
-        window=args.window,
-        hop=args.hop,
-        smooth_k=args.smooth_k,
-    )
+    try:
+        _run(
+            audio_path=audio_path,
+            sections=sections,
+            device=device,
+            center=center,
+            whiten=whiten,
+            also_pairwise=args.also_pairwise,
+            plot=not args.no_plot,
+            plot_output=Path(args.plot_output) if args.plot_output else None,
+            save_npz=Path(args.save_npz) if args.save_npz else None,
+            audio_name=audio_name,
+            window=args.window,
+            hop=args.hop,
+            smooth_k=args.smooth_k,
+        )
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
 
 
 if __name__ == "__main__":

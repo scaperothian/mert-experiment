@@ -45,9 +45,8 @@ discriminative for a given recording.
 .venv/bin/python -m mert_experiment.cli song.json --also-pairwise \
     --save-npz out.npz          # saves out.npz + out_pairwise.npz
 
-# Audio file with named sections
-.venv/bin/python -m mert_experiment.cli song.wav \
-  --section Intro 0 30 --section Verse 30 90 --section Chorus 90 130
+# Audio file — treated as one section covering the full duration
+.venv/bin/python -m mert_experiment.cli song.wav
 
 # Suppress plot
 .venv/bin/python -m mert_experiment.cli song.json --no-plot
