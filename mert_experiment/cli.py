@@ -22,17 +22,23 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .config import LAYERS_TO_PROBE, MERT_FRAME_RATE, TARGET_SR
+from .config import HOP_SEC, LAYERS_TO_PROBE, MERT_FRAME_RATE, TARGET_SR, WINDOW_SEC
 from .embed import embed_full_song, load_model
 from .io import load_audio, load_song
-from .plotting import _pairwise_path, plot_prototype_similarity, plot_section_grids
+from .plotting import (
+    _layer_mean_path,
+    _pairwise_path,
+    plot_layer_mean_similarity,
+    plot_prototype_similarity,
+    plot_section_grids,
+)
 from .similarity import cosine_block, cosine_matrix
 from .transform import apply_transform, fit_transform, l2_normalize_rows
 from .windows import (
     frame_to_section_assignment,
+    section_windows,
     whole_song_window_spans,
     window_means,
-    section_windows,
 )
 
 AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
@@ -50,10 +56,23 @@ def analyze_layer(
     layer_idx: int,
     center: bool,
     whiten: bool,
+    window: float = WINDOW_SEC,
+    hop: float = HOP_SEC,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Build prototypes, frame embeddings, and prototype-vs-frame similarity
     for one MERT layer, with optional centering and ZCA whitening.
+
+    Args:
+        frames:     [T, D] MERT frame embeddings for this layer
+        sections:   list of dicts with 'label', 'start', 'stop'
+        all_spans:  pre-computed whole-song window spans (shared across layers)
+        section_of: ground-truth section index for each span (-1 if outside all sections)
+        layer_idx:  layer number (used only for console output)
+        center:     subtract song-mean before computing similarity
+        whiten:     apply ZCA whitening after centering (requires center=True)
+        window:     sliding-window length in seconds (must match all_spans)
+        hop:        hop size in seconds (must match all_spans)
 
     Returns:
         A: [N_sec, N_frames]  prototype-vs-frame cosine similarity
@@ -63,7 +82,7 @@ def analyze_layer(
     # 1. Raw window means (normalization deferred until after transform)
     F_raw = window_means(frames, all_spans)
     section_raw = [
-        window_means(frames, list(section_windows(s["start"], s["stop"])))
+        window_means(frames, list(section_windows(s["start"], s["stop"], window=window, hop=hop)))
         for s in sections
     ]
 
@@ -133,9 +152,12 @@ def _run(
     plot_output: Path | None,
     save_npz: Path | None,
     audio_name: str,
+    window: float = WINDOW_SEC,
+    hop: float = HOP_SEC,
+    smooth_k: int = 3,
 ) -> None:
     tag = _transform_tag(center, whiten)
-    print(f"Transform: {tag}")
+    print(f"Transform: {tag}  |  window={window}s  hop={hop}s")
 
     processor, model = load_model(device)
     wav = load_audio(audio_path)
@@ -147,7 +169,7 @@ def _run(
     total_frames = hidden.shape[1]
     print(f"  hidden states: {tuple(hidden.shape)}  (layers+1, frames, dim)")
 
-    all_spans  = whole_song_window_spans(total_frames)
+    all_spans  = whole_song_window_spans(total_frames, window=window, hop=hop)
     section_of = [frame_to_section_assignment(sp, sections) for sp in all_spans]
     timestamps = np.array([(s + e) / 2 / MERT_FRAME_RATE for s, e in all_spans])
 
@@ -161,19 +183,26 @@ def _run(
             continue
         A, P, F = analyze_layer(
             hidden[layer_idx], sections, all_spans, section_of,
-            layer_idx, center, whiten,
+            layer_idx, center, whiten, window=window, hop=hop,
         )
         layer_A[layer_idx] = A
         layer_P[layer_idx] = P
         layer_F[layer_idx] = F
 
-    # --- Prototype-vs-frame line plot ----------------------------------------
+    # --- Build all plots, then show once -------------------------------------
     if plot:
         layer_results = {k: (layer_A[k], timestamps) for k in layer_A}
         plot_prototype_similarity(
             layer_results, sections, audio_name,
             output_path=plot_output,
             transform_tag=tag,
+        )
+        lm_output = _layer_mean_path(plot_output) if plot_output else None
+        plot_layer_mean_similarity(
+            layer_A, timestamps, sections, audio_name,
+            output_path=lm_output,
+            transform_tag=tag,
+            smooth_k=smooth_k,
         )
 
     # --- Section×section grid ------------------------------------------------
@@ -190,6 +219,11 @@ def _run(
             pairwise_npz = _pairwise_path(save_npz)
             np.savez(str(pairwise_npz), **{f"layer{k}": v for k, v in layer_grids.items()})
             print(f"Pairwise matrix saved to {pairwise_npz}")
+
+    # --- Show all interactive figures at once --------------------------------
+    if plot and not plot_output:
+        import matplotlib.pyplot as plt
+        plt.show()
 
     # --- Save VERSION A npz --------------------------------------------------
     if save_npz:
@@ -248,7 +282,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable ZCA whitening (whitening is on by default).",
     )
 
+    # Windowing parameters
+    p.add_argument(
+        "--window",
+        type=float,
+        default=WINDOW_SEC,
+        metavar="SEC",
+        help=(
+            f"Sliding window length in seconds (default: {WINDOW_SEC}). "
+            "Each embedding averages this many seconds of MERT frames. "
+            "Example: --window 1.0 gives 1-second look-back."
+        ),
+    )
+    p.add_argument(
+        "--hop",
+        type=float,
+        default=HOP_SEC,
+        metavar="SEC",
+        help=(
+            f"Hop size between windows in seconds (default: {HOP_SEC}). "
+            "Controls how often a new embedding is computed. "
+            "Example: --hop 0.1 produces a new embedding every 100 ms."
+        ),
+    )
+
     # Plot flags
+    p.add_argument(
+        "--smooth-k",
+        type=int,
+        default=3,
+        metavar="K",
+        help=(
+            "Smoothing window length for the layer-mean summary plot (default: 3). "
+            "Each point is averaged with the K-1 preceding points. "
+            "K=1 disables smoothing."
+        ),
+    )
     p.add_argument(
         "--no-plot",
         action="store_true",
@@ -259,9 +328,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="FILE",
         help=(
-            "Save the similarity line plot to FILE instead of displaying it. "
-            "When --also-pairwise is set, the section grid is saved alongside "
-            "with a '_pairwise' suffix (e.g. out.png → out_pairwise.png)."
+            "Save plots to FILE instead of displaying them. "
+            "The layer-mean summary is saved with a '_layermean' suffix "
+            "(e.g. out.png → out_layermean.png). "
+            "When --also-pairwise is set, the section grid uses '_pairwise'."
         ),
     )
     p.add_argument(
@@ -339,6 +409,9 @@ def main(argv: list[str] | None = None) -> None:
         plot_output=Path(args.plot_output) if args.plot_output else None,
         save_npz=Path(args.save_npz) if args.save_npz else None,
         audio_name=audio_name,
+        window=args.window,
+        hop=args.hop,
+        smooth_k=args.smooth_k,
     )
 
 

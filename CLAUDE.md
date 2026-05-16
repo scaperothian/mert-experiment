@@ -23,10 +23,17 @@ discriminative for a given recording.
 # Analyse a song — centering + ZCA whitening ON by default
 .venv/bin/python -m mert_experiment.cli song.json
 .venv/bin/python -m mert_experiment.cli song.json --plot-output sim.png
+# saves sim.png (per-layer) + sim_layermean.png (layer-mean + smoothed)
 
 # Disable transforms selectively
 .venv/bin/python -m mert_experiment.cli song.json --no-whiten          # center only
 .venv/bin/python -m mert_experiment.cli song.json --no-center --no-whiten  # raw baseline
+
+# Windowing: 1-second look-back updated every 100 ms
+.venv/bin/python -m mert_experiment.cli song.json --window 1.0 --hop 0.1
+
+# Smoothing: layer-mean plot averaged over 5 samples instead of 3
+.venv/bin/python -m mert_experiment.cli song.json --smooth-k 5
 
 # Save everything to disk
 .venv/bin/python -m mert_experiment.cli song.json --save-npz results.npz
@@ -34,7 +41,7 @@ discriminative for a given recording.
 # Also compute and plot section×section similarity grid
 .venv/bin/python -m mert_experiment.cli song.json --also-pairwise
 .venv/bin/python -m mert_experiment.cli song.json --also-pairwise \
-    --plot-output sim.png       # saves sim.png + sim_pairwise.png
+    --plot-output sim.png       # saves sim.png + sim_layermean.png + sim_pairwise.png
 .venv/bin/python -m mert_experiment.cli song.json --also-pairwise \
     --save-npz out.npz          # saves out.npz + out_pairwise.npz
 
@@ -56,7 +63,7 @@ discriminative for a given recording.
 | `windows.py` | `section_windows`, `whole_song_window_spans`, `window_means` (raw), `window_embeddings` (L2-normalized), `pool_normalized`, `pool_section`, `frame_to_section_assignment` |
 | `transform.py` | `fit_mu`, `fit_whitening_matrix`, `apply_transform`, `l2_normalize_rows`, `fit_transform` |
 | `similarity.py` | `cosine_matrix` (square), `cosine_block` (rectangular M×N), `print_matrix` |
-| `plotting.py` | `plot_prototype_similarity` (line chart), `plot_section_grids` (heatmap grid), `_pairwise_path` |
+| `plotting.py` | `plot_prototype_similarity` (per-layer line chart), `plot_layer_mean_similarity` (layer-mean + smoothed), `plot_section_grids` (heatmap grid), `causal_rolling_mean`, `_pairwise_path`, `_layer_mean_path` |
 | `cli.py` | `mert-sim` entry point, `analyze_layer`, `_run` |
 
 ## Core data flow
@@ -88,8 +95,16 @@ per layer:
   mean off-diagonal cosine_block(P, P) → separation metric
 
 plot_prototype_similarity(A, timestamps, sections)
-    → line plot, one subplot per layer, shared time axis
+    → per-layer line plot, one subplot per layer, shared time axis
     → vertical dashed lines at section boundaries
+
+plot_layer_mean_similarity(layer_A, timestamps, sections)
+    → two-panel summary: mean across layers + causal rolling-mean smoothed version
+    → smooth_k controls the rolling-mean window (default 3, CLI: --smooth-k)
+    → y-axis auto-scales to data range in both plots
+
+Both plot functions leave figures open; _run calls plt.show() once after all
+figures are built so they appear together in interactive mode.
 
 --also-pairwise:
   cosine_matrix(P)
@@ -110,18 +125,19 @@ Averaging raw windows then normalizing reintroduces the song-mean that was remov
 | `test_similarity.py` | `cosine_matrix`, `cosine_block`, `print_matrix` (incl. `mark_columns`) |
 | `test_io.py` | JSON parsing, WAV loading, resampling, stereo→mono |
 | `test_embed.py` | `embed_full_song` with mocked model — no download |
-| `test_plotting.py` | `plot_prototype_similarity`, `plot_section_grids`, `_pairwise_path` — file output |
+| `test_plotting.py` | `plot_prototype_similarity`, `plot_layer_mean_similarity`, `plot_section_grids`, `causal_rolling_mean`, `_pairwise_path`, `_layer_mean_path` |
 
-All 131 tests run in ~6 seconds with no internet access.
+All 148 tests run in ~6 seconds with no internet access.
 
 ## Output files
 
 | File | Contents |
 |---|---|
-| `results.npz` | `timestamps`, `section_starts/stops`, `layer{N}_A/P/F` per layer |
+| `results.npz` | `timestamps`, `section_starts/stops`, `transform`, `layer{N}_A/P/F` per layer |
 | `results_pairwise.npz` | `layer{N}` → `[N_sec, N_sec]` pooled similarity per layer |
-| `sim.png` | Prototype-vs-frame line plot |
-| `sim_pairwise.png` | Section×section grid heatmap |
+| `sim.png` | Per-layer prototype-vs-frame line plot (one subplot per layer) |
+| `sim_layermean.png` | Layer-mean summary: raw mean + causal rolling-mean smoothed |
+| `sim_pairwise.png` | Section×section grid heatmap (requires `--also-pairwise`) |
 
 ## Adding experiments
 
@@ -131,7 +147,12 @@ All 131 tests run in ~6 seconds with no internet access.
 3. Run with `--save-npz` and load arrays in a notebook for deeper analysis.
 4. Compare transforms: run `--no-center --no-whiten` vs `--no-whiten` vs default
    and observe how argmax accuracy and off-diagonal prototype similarity change.
-5. Add a test in `tests/` to lock in any invariant you discover.
+5. Try different windowing: `--window 1.0 --hop 0.1` gives a new embedding every
+   100 ms while still looking back 1 second of audio. Smaller hop → more
+   temporal resolution in the plots.
+6. Tune smoothing: `--smooth-k 1` shows raw layer-mean scores; larger K smooths
+   out frame-to-frame noise to reveal section-level trends.
+7. Add a test in `tests/` to lock in any invariant you discover.
 
 ## Dependencies
 
