@@ -38,7 +38,15 @@ pip install -e .
 
 For each probed MERT layer, computes a **[N\_sections × N\_frames]**
 cosine-similarity matrix (prototypes vs. every windowed frame), reports argmax
-accuracy, and by default shows a line-plot of similarity scores over time.
+accuracy and mean off-diagonal prototype similarity, and by default shows a
+line-plot of similarity scores over time.
+
+**Centering and ZCA whitening are applied by default** to combat embedding
+anisotropy — MERT embeddings cluster in a narrow cone, giving uniformly high
+cosine similarities (~0.85–0.95) with no transforms. Centering removes the
+dominant "this is what music sounds like" direction; whitening decorrelates the
+remaining dimensions. The result is discriminative scores that range from −0.4
+to 1.0 and clearly separate sections.
 
 ### From a ProPresenter JSON manifest
 
@@ -81,10 +89,24 @@ mert-sim song.wav \
 
 | Flag | Default | Description |
 |---|---|---|
+| `--no-center` | off | Disable song-mean centering (centering is **on** by default) |
+| `--no-whiten` | off | Disable ZCA whitening (whitening is **on** by default) |
 | `--no-plot` | off | Suppress all matplotlib output |
 | `--plot-output FILE` | display | Save the line plot to FILE instead of showing it |
 | `--also-pairwise` | off | Also compute and plot the section×section similarity grid |
 | `--save-npz FILE` | off | Save VERSION A matrices and embeddings to a `.npz` file |
+
+`--no-whiten` must be supplied alongside `--no-center` if you want to disable
+both. You cannot disable centering alone while keeping whitening (ZCA requires
+a centered input).
+
+### Transform examples
+
+```bash
+mert-sim song.json                    # centered + whitened (default)
+mert-sim song.json --no-whiten        # centered only
+mert-sim song.json --no-center --no-whiten  # raw baseline (no transform)
+```
 
 ### Default behaviour — line plot
 
@@ -141,20 +163,23 @@ The `.npz` file contains:
 
 ```
 mert_experiment/
-  config.py    — model ID, sample rate, window/hop sizes, layers to probe
-  io.py        — JSON manifest parsing, audio loading + resampling
-  embed.py     — MERT model loading and full-song inference
-  windows.py   — sliding-window spans, frame embedding, pooling, section assignment
+  config.py     — model ID, sample rate, window/hop sizes, layers to probe
+  io.py         — JSON manifest parsing, audio loading + resampling
+  embed.py      — MERT model loading and full-song inference
+  windows.py    — sliding-window spans, frame embedding/means, pooling, section assignment
+  transform.py  — centering (fit_mu), ZCA whitening (fit_whitening_matrix),
+                   apply_transform, l2_normalize_rows, fit_transform
   similarity.py — cosine_matrix, cosine_block, print_matrix
-  plotting.py  — line plot (prototype similarity over time), section grid heatmap
-  cli.py       — mert-sim entry point
+  plotting.py   — line plot (prototype similarity over time), section grid heatmap
+  cli.py        — mert-sim entry point
 
 tests/
-  test_io.py        — JSON loading and audio ingestion
-  test_windows.py   — all windowing and pooling functions
+  test_io.py         — JSON loading and audio ingestion
+  test_windows.py    — all windowing and pooling functions (incl. window_means)
+  test_transform.py  — centering, whitening, apply_transform, l2_normalize_rows, fit_transform
   test_similarity.py — cosine_matrix, cosine_block, print_matrix
-  test_embed.py     — MERT inference (model mocked)
-  test_plotting.py  — line plot and section grid (file output)
+  test_embed.py      — MERT inference (model mocked)
+  test_plotting.py   — line plot and section grid (file output)
 ```
 
 ## Config Knobs (`mert_experiment/config.py`)

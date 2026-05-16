@@ -61,6 +61,36 @@ def whole_song_window_spans(
     return spans
 
 
+def window_means(
+    layer_frames: torch.Tensor,
+    spans: list[tuple[int, int]],
+) -> torch.Tensor:
+    """
+    Mean-pool each span of frames WITHOUT L2 normalisation.
+
+    Use this when embeddings will be centered or whitened before normalizing;
+    normalization must happen after those transforms, not before.
+    For pre-normalized embeddings use window_embeddings instead.
+
+    Args:
+        layer_frames: [T, D] frame embeddings for one MERT layer
+        spans:        list of (start_frame, end_frame) pairs
+
+    Returns:
+        [W, D] raw (un-normalized) window means, or empty [0, D] if no valid spans
+    """
+    rows: list[torch.Tensor] = []
+    T = layer_frames.shape[0]
+    for s, e in spans:
+        e = min(e, T)
+        if e - s < 2:
+            continue
+        rows.append(layer_frames[s:e].mean(dim=0))
+    if rows:
+        return torch.stack(rows, dim=0)
+    return torch.empty(0, layer_frames.shape[-1])
+
+
 def window_embeddings(
     layer_frames: torch.Tensor,
     spans: list[tuple[int, int]],

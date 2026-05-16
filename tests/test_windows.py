@@ -8,6 +8,7 @@ from mert_experiment.windows import (
     pool_normalized,
     pool_section,
     section_windows,
+    window_means,
     whole_song_window_spans,
     window_embeddings,
 )
@@ -270,3 +271,64 @@ class TestFrameToSectionAssignment:
         sections = [{"label": "A", "start": 0.0, "stop": 10.0}]
         # at fps=10: centre = (0+10)/2/10 = 0.5s -> section 0
         assert frame_to_section_assignment((0, 10), sections, fps=10) == 0
+
+
+# --- window_means ------------------------------------------------------------
+
+class TestWindowMeans:
+    def _frames(self, n: int, dim: int = 16) -> torch.Tensor:
+        torch.manual_seed(55)
+        return torch.randn(n, dim)
+
+    def test_output_shape(self):
+        frames = self._frames(300)
+        spans = [(0, 75), (75, 150), (150, 225)]
+        out = window_means(frames, spans)
+        assert out.shape == (3, 16)
+
+    def test_rows_are_not_unit_norm(self):
+        # unlike window_embeddings, window_means must NOT normalize
+        frames = self._frames(300) * 10   # large values -> norms >> 1
+        spans = [(0, 75)]
+        out = window_means(frames, spans)
+        assert out.norm(dim=1).item() > 1.5
+
+    def test_values_equal_slice_mean(self):
+        frames = self._frames(300)
+        out = window_means(frames, [(0, 75)])
+        expected = frames[0:75].mean(dim=0)
+        assert torch.allclose(out[0], expected, atol=1e-5)
+
+    def test_clips_to_tensor_length(self):
+        frames = self._frames(100)
+        spans = [(0, 75), (50, 200)]   # second span exceeds tensor length
+        out = window_means(frames, spans)
+        assert out.shape[0] == 2
+
+    def test_skips_spans_shorter_than_two(self):
+        frames = self._frames(300)
+        spans = [(0, 75), (100, 101)]  # second span is 1 frame
+        out = window_means(frames, spans)
+        assert out.shape[0] == 1
+
+    def test_empty_when_no_valid_spans(self):
+        frames = self._frames(300)
+        out = window_means(frames, [(0, 1)])
+        assert out.shape == (0, 16)
+
+    def test_dim_matches_frames(self):
+        frames = self._frames(300, dim=32)
+        out = window_means(frames, [(0, 75)])
+        assert out.shape[1] == 32
+
+    def test_differs_from_window_embeddings(self):
+        # window_means returns raw means; window_embeddings returns L2-normalized means
+        from mert_experiment.windows import window_embeddings
+        frames = self._frames(300)
+        spans = [(0, 75)]
+        raw = window_means(frames, spans)
+        normed = window_embeddings(frames, spans)
+        # they should point in the same direction but have different norms
+        assert not torch.allclose(raw, normed, atol=1e-3)
+        cos = (raw / raw.norm()) @ (normed / normed.norm()).T
+        assert cos.item() > 0.99

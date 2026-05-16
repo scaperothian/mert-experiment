@@ -2,14 +2,18 @@
 mert-sim: section prototype vs. all-frame similarity (VERSION A).
 
 For each probed MERT layer:
-  1. Build a pooled 'gold' prototype embedding per section from the clean recording.
-  2. Slide windows across the whole song to produce N_frames embeddings.
-  3. Report argmax accuracy: how often the highest-similarity prototype matches
-     the ground-truth section for that frame.
-  4. Plot similarity scores as a line chart over time (enabled by default).
+  1. Compute raw window means across the full song.
+  2. Fit centering / ZCA-whitening from those means (both on by default).
+  3. Apply the transform, then L2-normalize, to get frame embeddings F.
+  4. Build section prototypes P by transforming each section's windows first,
+     averaging, then normalizing.  (Transform-before-average is critical:
+     averaging un-transformed windows re-introduces the song-mean we removed.)
+  5. Compute A = cosine_block(P, F) — [N_sections × N_frames].
+  6. Report argmax accuracy and mean off-diagonal prototype similarity.
+  7. Plot similarity scores as a line chart over time (enabled by default).
 
-In live deployment the same logic applies: prototypes stay fixed as gold
-references; incoming audio frames stream in and are compared against each.
+In live deployment prototypes stay fixed; incoming audio frames are transformed
+with the same fitted mu/W and compared against each prototype.
 """
 
 import argparse
@@ -23,11 +27,11 @@ from .embed import embed_full_song, load_model
 from .io import load_audio, load_song
 from .plotting import _pairwise_path, plot_prototype_similarity, plot_section_grids
 from .similarity import cosine_block, cosine_matrix
+from .transform import apply_transform, fit_transform, l2_normalize_rows
 from .windows import (
     frame_to_section_assignment,
-    pool_normalized,
     whole_song_window_spans,
-    window_embeddings,
+    window_means,
     section_windows,
 )
 
@@ -44,48 +48,95 @@ def analyze_layer(
     all_spans: list[tuple[int, int]],
     section_of: list[int],
     layer_idx: int,
+    center: bool,
+    whiten: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Build prototypes and frame embeddings for one MERT layer.
+    Build prototypes, frame embeddings, and prototype-vs-frame similarity
+    for one MERT layer, with optional centering and ZCA whitening.
 
     Returns:
         A: [N_sec, N_frames]  prototype-vs-frame cosine similarity
         P: [N_sec, D]         section prototype embeddings (numpy)
         F: [N_frames, D]      all-frame embeddings (numpy)
     """
-    prototypes = []
-    for sec in sections:
-        spans = list(section_windows(sec["start"], sec["stop"]))
-        W = window_embeddings(frames, spans)
-        prototypes.append(pool_normalized(W))
-    P_t = torch.stack(prototypes)                  # [N_sec, D]
-    F_t = window_embeddings(frames, all_spans)     # [N_frames, D]
-    A = cosine_block(P_t, F_t)                    # [N_sec, N_frames]
+    # 1. Raw window means (normalization deferred until after transform)
+    F_raw = window_means(frames, all_spans)
+    section_raw = [
+        window_means(frames, list(section_windows(s["start"], s["stop"])))
+        for s in sections
+    ]
 
+    # 2. Fit transform once from full-song frames
+    mu, W = fit_transform(F_raw, center=center, whiten=whiten)
+
+    # 3. Transform + normalize frame embeddings
+    F_norm = l2_normalize_rows(apply_transform(F_raw, mu, W))    # [N_frames, D]
+
+    # 4. Build prototypes: transform windows → average → normalize
+    prototypes = []
+    for raw_wins in section_raw:
+        if raw_wins.shape[0] == 0:
+            raise ValueError(
+                "A section produced zero windows — is WINDOW_SEC larger than "
+                "the section duration?"
+            )
+        transformed = apply_transform(raw_wins, mu, W)
+        proto = transformed.mean(dim=0, keepdim=True)
+        proto = l2_normalize_rows(proto).squeeze(0)
+        prototypes.append(proto)
+    P = torch.stack(prototypes)                                   # [N_sec, D]
+
+    # 5. Similarity
+    A = cosine_block(P, F_norm)                                   # [N_sec, N_frames]
+
+    # 6. Stats
     argmax = A.argmax(axis=0)
     correct = sum(1 for k, gt in enumerate(section_of) if gt >= 0 and argmax[k] == gt)
-    total = sum(1 for gt in section_of if gt >= 0)
-    acc = f"{correct}/{total} = {correct / total:.1%}" if total else "n/a"
-    print(f"  Layer {layer_idx}: {A.shape[0]} prototypes × {A.shape[1]} frames  "
-          f"| argmax accuracy: {acc}")
+    total   = sum(1 for gt in section_of if gt >= 0)
+    acc     = f"{correct}/{total} = {correct / total:.1%}" if total else "n/a"
 
-    return A, P_t.numpy(), F_t.numpy()
+    P_sim    = cosine_block(P, P)
+    n        = P_sim.shape[0]
+    mask     = ~np.eye(n, dtype=bool)
+    mean_off = float(P_sim[mask].mean()) if mask.any() else float("nan")
+
+    print(
+        f"  Layer {layer_idx}: argmax accuracy {acc}  |  "
+        f"mean off-diagonal prototype sim: {mean_off:.3f}"
+        + (" (lower = more separated)" if n > 1 else "")
+    )
+
+    return A, P.numpy(), F_norm.numpy()
 
 
 # ---------------------------------------------------------------------------
 # Shared analysis core
 # ---------------------------------------------------------------------------
 
+def _transform_tag(center: bool, whiten: bool) -> str:
+    if center and whiten:
+        return "centered+whitened"
+    if center:
+        return "centered"
+    return "baseline"
+
+
 def _run(
     audio_path: Path,
     sections: list[dict],
     device: str,
+    center: bool,
+    whiten: bool,
     also_pairwise: bool,
     plot: bool,
     plot_output: Path | None,
     save_npz: Path | None,
     audio_name: str,
 ) -> None:
+    tag = _transform_tag(center, whiten)
+    print(f"Transform: {tag}")
+
     processor, model = load_model(device)
     wav = load_audio(audio_path)
     duration = wav.shape[0] / TARGET_SR
@@ -101,14 +152,17 @@ def _run(
     timestamps = np.array([(s + e) / 2 / MERT_FRAME_RATE for s, e in all_spans])
 
     print("\nAnalysing layers:")
-    layer_A:   dict[int, np.ndarray] = {}
-    layer_P:   dict[int, np.ndarray] = {}
-    layer_F:   dict[int, np.ndarray] = {}
+    layer_A:  dict[int, np.ndarray] = {}
+    layer_P:  dict[int, np.ndarray] = {}
+    layer_F:  dict[int, np.ndarray] = {}
 
     for layer_idx in LAYERS_TO_PROBE:
         if layer_idx >= hidden.shape[0]:
             continue
-        A, P, F = analyze_layer(hidden[layer_idx], sections, all_spans, section_of, layer_idx)
+        A, P, F = analyze_layer(
+            hidden[layer_idx], sections, all_spans, section_of,
+            layer_idx, center, whiten,
+        )
         layer_A[layer_idx] = A
         layer_P[layer_idx] = P
         layer_F[layer_idx] = F
@@ -116,7 +170,11 @@ def _run(
     # --- Prototype-vs-frame line plot ----------------------------------------
     if plot:
         layer_results = {k: (layer_A[k], timestamps) for k in layer_A}
-        plot_prototype_similarity(layer_results, sections, audio_name, plot_output)
+        plot_prototype_similarity(
+            layer_results, sections, audio_name,
+            output_path=plot_output,
+            transform_tag=tag,
+        )
 
     # --- Section×section grid ------------------------------------------------
     if also_pairwise:
@@ -130,9 +188,7 @@ def _run(
             plot_section_grids(layer_grids, section_labels, audio_name, grid_output)
         if save_npz:
             pairwise_npz = _pairwise_path(save_npz)
-            np.savez(str(pairwise_npz), **{
-                f"layer{k}": v for k, v in layer_grids.items()
-            })
+            np.savez(str(pairwise_npz), **{f"layer{k}": v for k, v in layer_grids.items()})
             print(f"Pairwise matrix saved to {pairwise_npz}")
 
     # --- Save VERSION A npz --------------------------------------------------
@@ -141,6 +197,7 @@ def _run(
             "section_starts": np.array([s["start"] for s in sections]),
             "section_stops":  np.array([s["stop"]  for s in sections]),
             "timestamps":     timestamps,
+            "transform":      np.bytes_(tag),
         }
         for k in layer_A:
             flat[f"layer{k}_A"] = layer_A[k]
@@ -159,7 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="mert-sim",
         description=(
             "Section prototype vs. all-frame similarity via MERT embeddings. "
-            "Plots similarity scores over time by default."
+            "Mean-centering and ZCA whitening are applied by default to combat "
+            "embedding anisotropy. Plots similarity scores over time by default."
         ),
     )
     p.add_argument(
@@ -177,6 +235,20 @@ def build_parser() -> argparse.ArgumentParser:
             "Repeatable. Omit to treat the full file as one section."
         ),
     )
+
+    # Transform flags (both on by default)
+    p.add_argument(
+        "--no-center",
+        action="store_true",
+        help="Disable song-mean centering (centering is on by default).",
+    )
+    p.add_argument(
+        "--no-whiten",
+        action="store_true",
+        help="Disable ZCA whitening (whitening is on by default).",
+    )
+
+    # Plot flags
     p.add_argument(
         "--no-plot",
         action="store_true",
@@ -213,18 +285,22 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    center = not args.no_center
+    whiten = not args.no_whiten
+    if whiten and not center:
+        parser.error("--no-center cannot be combined with whitening; "
+                     "add --no-whiten or remove --no-center.")
+
     input_path = Path(args.input)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if input_path.suffix.lower() == ".json":
         if args.sections:
             parser.error("--section is only valid when passing an audio file, not a JSON.")
-        print(f"\nLoading MERT on {device}...")
         audio_path, sections = load_song(input_path)
         audio_name = input_path.stem
 
     elif input_path.suffix.lower() in AUDIO_SUFFIXES:
-        print(f"\nLoading MERT on {device}...")
         if args.sections:
             sections = [
                 {"label": s[0], "start": float(s[1]), "stop": float(s[2])}
@@ -245,6 +321,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
 
+    print(f"\nLoading MERT on {device}...")
     print(f"Audio: {audio_path}")
     print(f"Sections ({len(sections)}):")
     for i, s in enumerate(sections):
@@ -255,6 +332,8 @@ def main(argv: list[str] | None = None) -> None:
         audio_path=audio_path,
         sections=sections,
         device=device,
+        center=center,
+        whiten=whiten,
         also_pairwise=args.also_pairwise,
         plot=not args.no_plot,
         plot_output=Path(args.plot_output) if args.plot_output else None,

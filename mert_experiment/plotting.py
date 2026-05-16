@@ -12,6 +12,7 @@ def plot_prototype_similarity(
     sections: list[dict],
     audio_name: str = "",
     output_path: str | Path | None = None,
+    transform_tag: str = "",
 ) -> None:
     """
     Line plot of section-prototype similarity scores over time.
@@ -26,6 +27,7 @@ def plot_prototype_similarity(
         sections:       list of dicts with 'label', 'start', 'stop'
         audio_name:     used in the figure title
         output_path:    save to file if given; display interactively otherwise
+        transform_tag:  e.g. "centered+whitened" — appended to the title
     """
     import matplotlib.pyplot as plt
 
@@ -60,17 +62,18 @@ def plot_prototype_similarity(
             ax.axvline(x=t, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
 
         ax.set_ylabel("Cosine similarity", fontsize=8)
-        ax.set_ylim(-0.05, 1.05)
+        ax.margins(y=0.1)
         ax.set_title(f"Layer {layer_idx}", fontsize=10)
         ax.legend(loc="upper right", fontsize=7, ncol=2)
         ax.grid(axis="y", alpha=0.3)
 
     axes[-1].set_xlabel("Time (s)")
-    title = (
-        f"Section prototype similarity — {audio_name}"
-        if audio_name else "Section prototype similarity"
-    )
-    fig.suptitle(title, fontsize=13)
+    parts = ["Section prototype similarity"]
+    if transform_tag:
+        parts.append(f"({transform_tag})")
+    if audio_name:
+        parts.append(f"— {audio_name}")
+    fig.suptitle("  ".join(parts), fontsize=13)
     plt.tight_layout()
     _save_or_show(fig, output_path)
 
