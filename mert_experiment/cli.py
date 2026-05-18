@@ -29,6 +29,7 @@ from .io import load_audio, load_song
 from .plotting import (
     _layer_mean_path,
     _pairwise_path,
+    causal_rolling_mean,
     plot_layer_mean_similarity,
     plot_prototype_similarity,
     plot_section_grids,
@@ -80,6 +81,7 @@ def analyze_layer(
         P: [N_sec, D]         section prototype embeddings (numpy)
         F: [N_frames, D]      all-frame embeddings (numpy)
     """
+
     # 1. Raw window means (normalization deferred until after transform)
     F_raw = window_means(frames, all_spans)
     section_raw = [
@@ -126,6 +128,8 @@ def analyze_layer(
         f"mean off-diagonal prototype sim: {mean_off:.3f}"
         + (" (lower = more separated)" if n > 1 else "")
     )
+
+    #import pdb; pdb.set_trace()
 
     return A, P.numpy(), F_norm.numpy()
 
@@ -198,6 +202,32 @@ def _run(
         layer_A[layer_idx] = A
         layer_P[layer_idx] = P
         layer_F[layer_idx] = F
+
+    # --- Layer-mean and smoothed accuracy ------------------------------------
+    total_labeled = sum(1 for gt in section_of if gt >= 0)
+    if layer_A and total_labeled:
+        stack = np.stack(list(layer_A.values()), axis=0)
+        mean_A = stack.mean(axis=0)
+        smooth_A = causal_rolling_mean(mean_A, k=smooth_k)
+
+        argmax_mean = mean_A.argmax(axis=0)
+        correct_mean = sum(
+            1 for i, gt in enumerate(section_of)
+            if gt >= 0 and argmax_mean[i] == gt
+        )
+        argmax_smooth = smooth_A.argmax(axis=0)
+        correct_smooth = sum(
+            1 for i, gt in enumerate(section_of)
+            if gt >= 0 and argmax_smooth[i] == gt
+        )
+        print(
+            f"\n  Layer-mean           : {correct_mean}/{total_labeled}"
+            f" = {correct_mean / total_labeled:.1%}"
+        )
+        print(
+            f"  Smoothed ({smooth_k}-sample) : {correct_smooth}/{total_labeled}"
+            f" = {correct_smooth / total_labeled:.1%}"
+        )
 
     # --- Build all plots, then show once -------------------------------------
     if plot:
